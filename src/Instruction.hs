@@ -233,11 +233,6 @@ opMap = let f x mn am = (x, Opcode x mn am) in
     , f 0x73 RRA IndY
     ]
 
-enforceImplied :: AddrMode -> NES ()
-enforceImplied m = case m of
-  Implied -> pure ()
-  _       -> error "todo"
-
 evalOperand :: AddrMode -> NES Word8
 evalOperand m = case m of
   Immed -> asks (envCPU .> cpuRegPC) >>= readRef >>= \pc -> readMem8 (pc-1)
