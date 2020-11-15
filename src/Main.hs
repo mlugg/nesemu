@@ -9,6 +9,8 @@ import Data.Vector.Unboxed.Mutable as V
 import Colog
 import Data.IORef
 import qualified Data.ByteString as BS
+import Control.Concurrent.STM
+import Control.Concurrent.MVar
 
 import Common
 import Instruction
@@ -18,39 +20,48 @@ import RomParse
 import System.CPUTime
 
 test :: NES ()
-test =
-  liftIO getCPUTime >>= \start ->
-  testLoop *>
-  liftIO getCPUTime >>= \end ->
-  let diff = fromIntegral (end-start) / 10^12 in
-  liftIO $ printf "computation took %0.3f secs\n" (diff::Double)
+test = do
+  start <- liftIO getCPUTime
+  testLoop
+  end <- liftIO getCPUTime
+  let diff = fromIntegral (end-start) / 10^12 :: Double
+  liftIO $ printf "computation took %0.3f secs\n" diff
 
 testLoop :: NES ()
-testLoop =
-  doInsn *>
-  asks (envCPU .> cpuRegPC) >>= readRef >>= \pc ->
+testLoop = do
+  doInsn
+  pc <- readCPU cpuRegPC
   if pc /= 0xC66E
   then testLoop
-  else
-    readMem8 0x0002 >>= \a ->
-    readMem8 0x0003 >>= \b ->
-    (asks envCycles >>= readRef) >>= \c ->
-    liftIO (printf "Exec finished! 0x0002 was %d, 0x0003 was %d, did %d cycles\n" a b c)
+  else do
+    a <- readMem8 0x0002
+    b <- readMem8 0x0003
+    c <- readCPU cpuCycles
+    liftIO $ printf "Exec finished! 0x0002 was %d, 0x0003 was %d, did %d cycles\n" a b c
 
 mkNES :: IOVector Word8 -> IO Env
 mkNES mem =
   Env
-      simpleMessageAction
---      (LogAction $ const $ pure ())
+--      simpleMessageAction
+      (LogAction $ const $ pure ())
     mem
-  <$> (CPU
+  <$> (PPU
+        <$> newIORef 0
+        <*> newIORef 0
+        <*> V.new 0
+        <*> newIORef 0)
+  <*> (CPU
         <$> newIORef 0
         <*> newIORef 0
         <*> newIORef 0
         <*> newIORef 0xFD
         <*> newIORef 0x04
-        <*> newIORef 0xC000)
-  <*> newIORef 7
+        <*> newIORef 0xC000
+        <*> newIORef 7)
+  <*> (NESSync
+        <$> atomically newTQueue
+        <*> newEmptyMVar
+        <*> newEmptyMVar)
 
 dumpMem :: NES ()
 dumpMem =

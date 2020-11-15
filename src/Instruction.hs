@@ -63,8 +63,8 @@ operandLen IndY    = 1
 data Opcode = Opcode Word8 Mnemonic AddrMode
 
 pPrintOperand :: AddrMode -> NES String
-pPrintOperand am =
-  asks (envCPU .> cpuRegPC) >>= readRef >>= \pc ->
+pPrintOperand am = do
+  pc <- readCPU cpuRegPC
   case am of
     Implied -> pure   ""
     Accum   -> pure   "A"
@@ -235,7 +235,7 @@ opMap = let f x mn am = (x, Opcode x mn am) in
 
 evalOperand :: AddrMode -> NES Word8
 evalOperand m = case m of
-  Immed -> asks (envCPU .> cpuRegPC) >>= readRef >>= \pc -> readMem8 (pc-1)
+  Immed -> readCPU cpuRegPC >>= \pc -> readMem8 (pc-1)
   _     -> evalLOperand m >>= readVal
 
 evalLOperand :: AddrMode -> NES DataLoc
@@ -246,32 +246,34 @@ evalLOperand m = case m of
   _       -> Mem <$> evalMemOperand m
 
 evalMemOperand :: AddrMode -> NES Word16
-evalMemOperand m = asks (envCPU .> cpuRegPC) >>= readRef >>= \pc -> case m of
-  ZeroPg  -> cvt16 <$> readMem8 (pc-1)
-  ZeroPgX -> cvt16 <$> ((+) <$> readMem8 (pc-1) <*> readVal RX)
-  ZeroPgY -> cvt16 <$> ((+) <$> readMem8 (pc-1) <*> readVal RY)
-  Abs     -> readMem16 (pc-2)
-  AbsX    -> ((+) <$> readMem16 (pc-2) <*> (cvt16 <$> readVal RX))
-  AbsY    -> ((+) <$> readMem16 (pc-2) <*> (cvt16 <$> readVal RY))
-  Ind     -> (readMem16 (pc-2) >>= \a -> readMem16Pg (fromIntegral $ a `shiftR` 8) (fromIntegral a))
-  IndX    -> ((+) <$> readMem8 (pc-1) <*> readVal RX >>= readMem16Pg 0)
-  IndY    -> ((+) <$> (readMem8 (pc-1) >>= readMem16Pg 0) <*> (cvt16 <$> readVal RY))
-  Rel     -> fromIntegral . (fromIntegral pc +) . cvt32S . sign8 <$> readMem8 (pc-1)
-  _       -> error "todo"
+evalMemOperand m = do
+  pc <- readCPU cpuRegPC
+  case m of
+    ZeroPg  -> cvt16 <$> readMem8 (pc-1)
+    ZeroPgX -> cvt16 <$> ((+) <$> readMem8 (pc-1) <*> readVal RX)
+    ZeroPgY -> cvt16 <$> ((+) <$> readMem8 (pc-1) <*> readVal RY)
+    Abs     -> readMem16 (pc-2)
+    AbsX    -> ((+) <$> readMem16 (pc-2) <*> (cvt16 <$> readVal RX))
+    AbsY    -> ((+) <$> readMem16 (pc-2) <*> (cvt16 <$> readVal RY))
+    Ind     -> (readMem16 (pc-2) >>= \a -> readMem16Pg (fromIntegral $ a `shiftR` 8) (fromIntegral a))
+    IndX    -> ((+) <$> readMem8 (pc-1) <*> readVal RX >>= readMem16Pg 0)
+    IndY    -> ((+) <$> (readMem8 (pc-1) >>= readMem16Pg 0) <*> (cvt16 <$> readVal RY))
+    Rel     -> fromIntegral . (fromIntegral pc +) . cvt32S . sign8 <$> readMem8 (pc-1)
+    _       -> error "todo"
 
 setFlagBit :: Int -> Bool -> NES ()
-setFlagBit b v =
-  getFlags False >>= \old ->
-  let new = setClearBit b v old in
+setFlagBit b v = do
+  old <- getFlags False
+  let new = setClearBit b v old
   setFlags new
 
 testFlagBit :: Int -> NES Bool
 testFlagBit b = getFlags True <&> \f -> testBit f b
 
 updateFlags :: Word8 -> NES ()
-updateFlags val =
-  getFlags False >>= \old ->
-  let new = setClearBit 1 (val == 0) $ setClearBit 7 (testBit val 7) old in
+updateFlags val = do
+  old <- getFlags False
+  let new = setClearBit 1 (val == 0) $ setClearBit 7 (testBit val 7) old
   setFlags new
 
 getModeCycles :: AddrMode -> Int
@@ -298,21 +300,22 @@ getPageCrossPenalty (Opcode _ m am) =
     AbsY -> pure 1
     IndY -> pure 1
     _    -> pure 0
-  else asks (envCPU .> cpuRegPC) >>= readRef >>= \pc ->
-  case am of
-    AbsX -> do
-      a <- cvt8 <$> readMem16 (pc-2)
-      x <- readVal RX
-      pure $ if a+x < x then 1 else 0
-    AbsY -> do
-      a <- cvt8 <$> readMem16 (pc-2)
-      y <- readVal RY
-      pure $ if a+y < a then 1 else 0
-    IndY -> do
-      a <- (readMem8 (pc-1) >>= readMem16 . cvt16) <&> cvt8
-      y <- readVal RY
-      pure $ if a+y < a then 1 else 0
-    _    -> pure 0
+  else do
+    pc <- readCPU cpuRegPC
+    case am of
+      AbsX -> do
+        a <- cvt8 <$> readMem16 (pc-2)
+        x <- readVal RX
+        pure $ if a+x < x then 1 else 0
+      AbsY -> do
+        a <- cvt8 <$> readMem16 (pc-2)
+        y <- readVal RY
+        pure $ if a+y < a then 1 else 0
+      IndY -> do
+        a <- (readMem8 (pc-1) >>= readMem16 . cvt16) <&> cvt8
+        y <- readVal RY
+        pure $ if a+y < a then 1 else 0
+      _    -> pure 0
 
 hasPageCrossPenalty :: Mnemonic -> Bool
 hasPageCrossPenalty m = case m of
@@ -326,96 +329,90 @@ getTotalModeCycles :: Opcode -> NES Int
 getTotalModeCycles o@(Opcode _ _ am) = getPageCrossPenalty o <&> (+ getModeCycles am)
 
 advanceCycles :: Int -> NES ()
-advanceCycles x = asks envCycles >>= liftIO . flip modifyIORef' (+x)
+advanceCycles x = modifyCPU cpuCycles (+x)
 
 differentPage :: Word16 -> NES Bool
-differentPage addr = (asks (envCPU .> cpuRegPC) >>= readRef) <&> \pc ->
+differentPage addr = readCPU cpuRegPC <&> \pc ->
   (pc .&. 0xff00) /= (addr .&. 0xff00)
 
 -- All branching ops are basically the same code, so we take out the
 -- common pattern
 branchOp :: AddrMode -> Int -> Bool -> NES ()
-branchOp mode bit val =
-  testFlagBit bit >>= \v ->
-  advanceCycles 2 *>
-  if v == val
-  then
-    evalMemOperand mode >>= \addr -> 
-    differentPage addr  >>= \diffPg ->
-    let c = if diffPg then 2 else 1 in
-    advanceCycles c *>
-    asks (envCPU .> cpuRegPC) >>= flip writeRef addr
-  else pure ()
+branchOp mode bit val = do
+  v <- testFlagBit bit
+  advanceCycles 2
+  when (v == val) $ do
+    addr <- evalMemOperand mode
+    diffPg <- differentPage addr
+    let c = if diffPg then 2 else 1
+    advanceCycles c
+    writeCPU cpuRegPC addr
 
 -- All transfer ops are basically the same code too
 transferOp :: DataLoc -> DataLoc -> Bool -> NES ()
-transferOp src dst doFlags =
-  readVal src >>= \val ->
-  writeVal dst val *>
-  advanceCycles 2  *>
-  if doFlags
-  then updateFlags val
-  else pure ()
+transferOp src dst doFlags = do
+  val <- readVal src
+  writeVal dst val
+  advanceCycles 2
+  when (doFlags) $ updateFlags val
 
 stackPush8 :: Word8 -> NES ()
-stackPush8 val =
-  readVal RS >>= \stack ->
-  writeMem8 (0x0100 + cvt16 stack) val *>
+stackPush8 val = do
+  stack <- readVal RS
+  writeMem8 (0x0100 + cvt16 stack) val
   writeVal RS (stack-1)
 
 stackPush16 :: Word16 -> NES ()
-stackPush16 val =
-  readVal RS >>= \stack ->
-  writeMem16 (0x0100 + cvt16 (stack-1)) val *>
+stackPush16 val = do
+  stack <- readVal RS
+  writeMem16 (0x0100 + cvt16 (stack-1)) val
   writeVal RS (stack-2)
 
 stackPop8 :: NES Word8
-stackPop8 =
-  readVal RS >>= \stack ->
-  readMem8 (0x0100 + cvt16 (stack+1)) <*
-  writeVal RS (stack+1)
+stackPop8 = do
+  stack <- readVal RS
+  readMem8 (0x0100 + cvt16 (stack+1)) <* writeVal RS (stack+1)
 
 stackPop16 :: NES Word16
-stackPop16 =
-  readVal RS >>= \stack ->
-  readMem16 (0x0100 + cvt16 (stack+1)) <*
-  writeVal RS (stack+2)
+stackPop16 = do
+  stack <- readVal RS
+  readMem16 (0x0100 + cvt16 (stack+1)) <* writeVal RS (stack+2)
 
 adcOp :: Word8 -> NES ()
-adcOp m =
-  readVal RA       >>= \a ->
-  testFlagBit 0    >>= \carryIn ->
-  let sum = cvt16 m + cvt16 a + (if carryIn then 1 else 0) in
-  writeVal RA (cvt8 sum)       *>
-  setFlagBit 0 (sum > 0xFF)    *>
-  setFlagBit 1 (cvt8 sum == 0) *>
-  setFlagBit 6 (complement (a `xor` m) .&. (a `xor` cvt8 sum) .&. 0x80 /= 0) *>
+adcOp m = do
+  a <- readVal RA
+  carryIn <- testFlagBit 0
+  let sum = cvt16 m + cvt16 a + (if carryIn then 1 else 0)
+  writeVal RA (cvt8 sum)
+  setFlagBit 0 (sum > 0xFF)
+  setFlagBit 1 (cvt8 sum == 0)
+  setFlagBit 6 (complement (a `xor` m) .&. (a `xor` cvt8 sum) .&. 0x80 /= 0)
   setFlagBit 7 (testBit sum 7)
 
 -- By the time this is run, the program counter has ALREADY BEEN
 -- INCREMENTED to the next instruction
 runOp :: Opcode -> NES ()
-runOp o@(Opcode opcode mn mode) =
-  (getTotalModeCycles o >>= advanceCycles) *>
+runOp o@(Opcode opcode mn mode) = do
+  getTotalModeCycles o >>= advanceCycles
   case mn of
     ADC ->
       evalOperand mode >>= adcOp
 
-    AND ->
-      evalOperand mode >>= \x ->
-      readVal RA       >>= \old ->
-      let new = old .&. x in
-      writeVal RA new *>
+    AND -> do
+      x <- evalOperand mode
+      old <- readVal RA
+      let new = old .&. x
+      writeVal RA new
       updateFlags new
 
-    ASL ->
-      evalLOperand mode >>= \loc ->
-      readVal loc       >>= \old ->
-      let new = old `shiftL` 1 in
-      writeVal loc new *>
-      setFlagBit 0 (testBit old 7) *>
-      setFlagBit 1 (new == 0)      *>
-      setFlagBit 7 (testBit new 7) *>
+    ASL -> do
+      loc <- evalLOperand mode
+      old <- readVal loc
+      let new = old `shiftL` 1
+      writeVal loc new
+      setFlagBit 0 (testBit old 7)
+      setFlagBit 1 (new == 0)
+      setFlagBit 7 (testBit new 7)
       advanceCycles 2
 
     BCC -> branchOp mode 0 False
@@ -427,16 +424,15 @@ runOp o@(Opcode opcode mn mode) =
     BPL -> branchOp mode 7 False
     BMI -> branchOp mode 7 True
 
-    BIT ->
-      evalOperand mode >>= \x ->
-      readVal RA       >>= \a ->
-      let res = a .&. x in
-      setFlagBit 1 (res == 0)    *>
-      setFlagBit 6 (testBit x 6) *>
+    BIT -> do
+      x <- evalOperand mode
+      a <- readVal RA
+      let res = a .&. x
+      setFlagBit 1 (res == 0)
+      setFlagBit 6 (testBit x 6)
       setFlagBit 7 (testBit x 7)
 
-    BRK ->
-      interrupt 0xFFFE True
+    BRK -> interrupt 0xFFFE True
 
     CLC -> setFlagBit 0 False *> advanceCycles 2
     SEC -> setFlagBit 0 True  *> advanceCycles 2
@@ -446,114 +442,112 @@ runOp o@(Opcode opcode mn mode) =
     CLD -> setFlagBit 3 False *> advanceCycles 2
     SED -> setFlagBit 3 True  *> advanceCycles 2
 
-    CMP ->
-      evalOperand mode >>= \m ->
-      readVal RA       >>= \a ->
-      let val = a - m in
-      updateFlags val *>
+    CMP -> do
+      m <- evalOperand mode
+      a <- readVal RA
+      let val = a - m
+      updateFlags val
       setFlagBit 0 (a >= m)
 
-    CPX ->
-      evalOperand mode >>= \m ->
-      readVal RX       >>= \x ->
-      let val = x - m in
-      updateFlags val *>
+    CPX -> do
+      m <- evalOperand mode
+      x <- readVal RX
+      let val = x - m
+      updateFlags val
       setFlagBit 0 (x >= m)
 
-    CPY ->
-      evalOperand mode >>= \m ->
-      readVal RY       >>= \y ->
-      let val = y - m in
-      updateFlags val *>
+    CPY -> do
+      m <- evalOperand mode
+      y <- readVal RY
+      let val = y - m
+      updateFlags val
       setFlagBit 0 (y >= m)
 
-    DEC ->
-      evalLOperand mode >>= \loc ->
-      readVal loc       >>= \old ->
-      let new = old - 1 in
-      updateFlags new  *>
-      writeVal loc new *>
+    DEC -> do
+      loc <- evalLOperand mode
+      old <- readVal loc
+      let new = old - 1
+      updateFlags new
+      writeVal loc new
       advanceCycles 2
 
-    DEX ->
-      readVal RX >>= \old ->
-      let new = old - 1 in
-      updateFlags new *>
-      writeVal RX new *>
+    DEX -> do
+      old <- readVal RX
+      let new = old - 1
+      updateFlags new
+      writeVal RX new
       advanceCycles 2
 
-    DEY ->
-      readVal RY >>= \old ->
-      let new = old - 1 in
-      updateFlags new *>
-      writeVal RY new *>
+    DEY -> do
+      old <- readVal RY
+      let new = old - 1
+      updateFlags new
+      writeVal RY new
       advanceCycles 2
 
-    EOR ->
-      evalOperand mode >>= \m ->
-      readVal RA       >>= \a ->
-      let val = a `xor` m in
-      updateFlags val *>
+    EOR -> do
+      m <- evalOperand mode
+      a <- readVal RA
+      let val = a `xor` m
+      updateFlags val
       writeVal RA val
 
-    INC ->
-      evalLOperand mode >>= \loc ->
-      readVal loc       >>= \old ->
-      let new = old + 1 in
-      updateFlags new  *>
-      writeVal loc new *>
+    INC -> do
+      loc <- evalLOperand mode
+      old <- readVal loc
+      let new = old + 1
+      updateFlags new
+      writeVal loc new
       advanceCycles 2
 
-    INX ->
-      readVal RX >>= \old ->
-      let new = old + 1 in
-      updateFlags new *>
-      writeVal RX new *>
+    INX -> do
+      old <- readVal RX
+      let new = old + 1
+      updateFlags new
+      writeVal RX new
       advanceCycles 2
 
-    INY ->
-      readVal RY >>= \old ->
-      let new = old + 1 in
-      updateFlags new *>
-      writeVal RY new *>
+    INY -> do
+      old <- readVal RY
+      let new = old + 1
+      updateFlags new
+      writeVal RY new
       advanceCycles 2
 
-    JMP ->
-      evalMemOperand mode       >>= \addr ->
-      asks (envCPU .> cpuRegPC) >>= \pcRef ->
-      writeRef pcRef addr *>
+    JMP -> do
+      addr <- evalMemOperand mode
+      writeCPU cpuRegPC addr
       advanceCycles (-1)  -- An annoying case: JMP is a bit faster than everything else
 
-    JSR ->
-      evalMemOperand mode       >>= \addr ->
-      asks (envCPU .> cpuRegPC) >>= \pcRef ->
-      readRef pcRef             >>= \ret ->
-      stackPush16 (ret - 1) *>
-      writeRef pcRef addr   *>
+    JSR -> do
+      addr <- evalMemOperand mode
+      ret <- readCPU cpuRegPC
+      stackPush16 (ret - 1)
+      writeCPU cpuRegPC addr
       advanceCycles 2
 
-    LDA ->
-      evalOperand mode >>= \val ->
-      writeVal RA val *>
+    LDA -> do
+      val <- evalOperand mode
+      writeVal RA val
       updateFlags val
 
-    LDX ->
-      evalOperand mode >>= \val ->
-      writeVal RX val *>
+    LDX -> do
+      val <- evalOperand mode
+      writeVal RX val
       updateFlags val
 
-    LDY ->
-      evalOperand mode >>= \val ->
-      writeVal RY val *>
+    LDY -> do
+      val <- evalOperand mode
+      writeVal RY val
       updateFlags val
       
-    LSR ->
-      evalLOperand mode >>= \loc ->
-      readVal loc       >>= \old ->
-      let new = old `shiftR` 1 in
-      writeVal loc new *>
-      updateFlags new  *>
-      setFlagBit 0 (testBit old 0) *>
+    LSR -> do
+      loc <- evalLOperand mode
+      old <- readVal loc
+      let new = old `shiftR` 1
+      writeVal loc new
+      updateFlags new
+      setFlagBit 0 (testBit old 0)
       advanceCycles 2
 
     NOP ->
@@ -565,83 +559,83 @@ runOp o@(Opcode opcode mn mode) =
     TOP ->
       pure ()
 
-    ORA ->
-      evalOperand mode >>= \m ->
-      readVal RA       >>= \a ->
-      let res = m .|. a in
-      writeVal RA res *>
+    ORA -> do
+      m <- evalOperand mode
+      a <- readVal RA
+      let res = m .|. a
+      writeVal RA res
       updateFlags res
 
-    PHA ->
-      (readVal RA >>= stackPush8) *>
+    PHA -> do
+      readVal RA >>= stackPush8
       advanceCycles 3
 
-    PHP ->
-      (getFlags True >>= stackPush8) *>
+    PHP -> do
+      getFlags True >>= stackPush8
       advanceCycles 3
 
-    PLA ->
-      stackPop8 >>= \a ->
-      writeVal RA a *>
-      updateFlags a *>
+    PLA -> do
+      a <- stackPop8
+      writeVal RA a
+      updateFlags a
       advanceCycles 4
 
-    PLP ->
-      (stackPop8 >>= setFlags) *>
+    PLP -> do
+      stackPop8 >>= setFlags
       advanceCycles 4
 
-    ROL ->
-      evalLOperand mode >>= \loc ->
-      readVal loc       >>= \old ->
-      testFlagBit 0     >>= \carryIn ->
-      let new = setClearBit 0 carryIn $ old `shiftL` 1 in
-      writeVal loc new *>
-      readVal RA  >>= \acc ->
-      setFlagBit 0 (testBit old 7) *>
-      setFlagBit 1 (acc == 0)      *>
-      setFlagBit 7 (testBit new 7) *>
+    ROL -> do
+      loc <- evalLOperand mode
+      old <- readVal loc
+      carryIn <- testFlagBit 0
+      let new = setClearBit 0 carryIn $ old `shiftL` 1
+      writeVal loc new
+      acc <- readVal RA
+      setFlagBit 0 (testBit old 7)
+      setFlagBit 1 (acc == 0)
+      setFlagBit 7 (testBit new 7)
       advanceCycles 2
 
-    ROR ->
-      evalLOperand mode >>= \loc ->
-      readVal loc       >>= \old ->
-      testFlagBit 0     >>= \carryIn ->
-      let new = setClearBit 7 carryIn $ old `shiftR` 1 in
-      writeVal loc new *>
-      readVal RA  >>= \acc ->
-      setFlagBit 0 (testBit old 0) *>
-      setFlagBit 1 (acc == 0)      *>
-      setFlagBit 7 (testBit new 7) *>
+    ROR -> do
+      loc <- evalLOperand mode
+      old <- readVal loc
+      carryIn <- testFlagBit 0
+      let new = setClearBit 7 carryIn $ old `shiftR` 1
+      writeVal loc new
+      acc <- readVal RA
+      setFlagBit 0 (testBit old 0)
+      setFlagBit 1 (acc == 0)
+      setFlagBit 7 (testBit new 7)
       advanceCycles 2
 
-    RTI ->
-      asks (envCPU .> cpuRegPC) >>= \pcRef ->
-      (stackPop8  >>= setFlags)       *>
-      (stackPop16 >>= writeRef pcRef) *>
+    RTI -> do
+      pcRef <- readCPU cpuRegPC
+      stackPop8  >>= setFlags
+      stackPop16 >>= writeCPU cpuRegPC
       advanceCycles 6
 
-    RTS ->
-      stackPop16                >>= \addr ->
-      asks (envCPU .> cpuRegPC) >>= \pcRef ->
-      writeRef pcRef (addr+1) *>
+    RTS -> do
+      addr <- stackPop16
+      pcRef <- readCPU cpuRegPC
+      writeCPU cpuRegPC (addr+1)
       advanceCycles 6
 
     SBC ->
       evalOperand mode >>= adcOp . complement
 
-    STA ->
-      evalLOperand mode >>= \loc ->
-      readVal RA        >>= \a ->
+    STA -> do
+      loc <- evalLOperand mode
+      a <- readVal RA
       writeVal loc a
 
-    STX ->
-      evalLOperand mode >>= \loc ->
-      readVal RX        >>= \x ->
+    STX -> do
+      loc <- evalLOperand mode
+      x <- readVal RX
       writeVal loc x
 
-    STY ->
-      evalLOperand mode >>= \loc ->
-      readVal RY        >>= \y ->
+    STY -> do
+      loc <- evalLOperand mode
+      y <- readVal RY
       writeVal loc y
 
     TAX ->
@@ -662,87 +656,83 @@ runOp o@(Opcode opcode mn mode) =
     TYA ->
       transferOp RY RA True
 
-    LAX ->
-      evalOperand mode >>= \val ->
-      writeVal RA val *>
-      writeVal RX val *>
+    LAX -> do
+      val <- evalOperand mode
+      writeVal RA val
+      writeVal RX val
       updateFlags val
 
-    SAX ->
-      evalLOperand mode >>= \loc ->
-      readVal RA >>= \a ->
-      readVal RX >>= \x ->
-      let res = a .&. x in
+    SAX -> do
+      loc <- evalLOperand mode
+      a <- readVal RA
+      x <- readVal RX
+      let res = a .&. x
       writeVal loc res
 
-    DCP ->
-      evalLOperand mode >>= \loc ->
-      readVal loc >>= \old ->
-      readVal RA  >>= \a ->
+    DCP -> do
+      loc <- evalLOperand mode
+      old <- readVal loc
+      a <- readVal RA
       let new = old - 1
           flagVal = a - new
-      in
-      writeVal loc new *>
-      updateFlags flagVal *>
-      setFlagBit 0 (a >= new) *>
+      writeVal loc new
+      updateFlags flagVal
+      setFlagBit 0 (a >= new)
       advanceCycles 2
 
-    ISC ->
-      evalLOperand mode >>= \loc ->
-      readVal loc       >>= \old ->
-      let new = old + 1 in
-      writeVal loc new       *>
-      adcOp (complement new) *>
+    ISC -> do
+      loc <- evalLOperand mode
+      old <- readVal loc
+      let new = old + 1
+      writeVal loc new
+      adcOp (complement new)
       advanceCycles 2
 
-    SLO ->
-      evalLOperand mode >>= \loc ->
-      readVal loc       >>= \old ->
-      readVal RA        >>= \acc ->
+    SLO -> do
+      loc <- evalLOperand mode
+      old <- readVal loc
+      acc <- readVal RA
       let new = old `shiftL` 1
           accRes = new .|. acc
-      in
-      writeVal loc new    *>
-      writeVal RA  accRes *>
-      setFlagBit 0 (testBit old 7) *>
-      updateFlags accRes *>
+      writeVal loc new
+      writeVal RA  accRes
+      setFlagBit 0 (testBit old 7)
+      updateFlags accRes
       advanceCycles 2
 
-    RLA ->
-      evalLOperand mode >>= \loc ->
-      readVal loc       >>= \old ->
-      testFlagBit 0     >>= \carryIn ->
-      readVal RA        >>= \acc ->
+    RLA -> do
+      loc <- evalLOperand mode
+      old <- readVal loc
+      carryIn <- testFlagBit 0
+      acc <- readVal RA
       let new = setClearBit 0 carryIn $ old `shiftL` 1
           accNew = acc .&. new
-      in
-      writeVal loc new *>
-      writeVal RA accNew *>
-      setFlagBit 0 (testBit old 7) *>
-      updateFlags accNew *>
+      writeVal loc new
+      writeVal RA accNew
+      setFlagBit 0 (testBit old 7)
+      updateFlags accNew
       advanceCycles 2
 
-    SRE ->
-      evalLOperand mode >>= \loc ->
-      readVal loc       >>= \old ->
-      readVal RA        >>= \acc ->
+    SRE -> do
+      loc <- evalLOperand mode
+      old <- readVal loc
+      acc <- readVal RA
       let new = old `shiftR` 1
           accNew = acc `xor` new
-      in
-      writeVal loc new *>
-      writeVal RA accNew *>
-      setFlagBit 0 (testBit old 0) *>
-      updateFlags accNew *>
+      writeVal loc new
+      writeVal RA accNew
+      setFlagBit 0 (testBit old 0)
+      updateFlags accNew
       advanceCycles 2
 
-    RRA ->
-      evalLOperand mode >>= \loc ->
-      readVal loc       >>= \old ->
-      testFlagBit 0     >>= \carryIn ->
-      let new = setClearBit 7 carryIn $ old `shiftR` 1 in
-      writeVal loc new *>
-      setFlagBit 0 (testBit old 0) *>
-      adcOp new *>
+    RRA -> do
+      loc <- evalLOperand mode
+      old <- readVal loc
+      carryIn <- testFlagBit 0
+      let new = setClearBit 7 carryIn $ old `shiftR` 1
+      writeVal loc new
+      setFlagBit 0 (testBit old 0)
+      adcOp new
       advanceCycles 2
 
 triggerIRQ :: NES ()
@@ -752,29 +742,27 @@ triggerNMI :: NES ()
 triggerNMI = interrupt 0xFFFA False
 
 interrupt :: Word16 -> Bool -> NES ()
-interrupt vec soft =
-  asks (envCPU .> cpuRegPC) >>= \pcRef ->
-  (readRef pcRef >>= stackPush16) *>
-  (getFlags soft >>= stackPush8)  *>
-  setFlagBit 2 True *>
-  readMem16 vec >>= \addr ->
-  writeRef pcRef addr *>
+interrupt vec soft = do
+  readCPU cpuRegPC >>= stackPush16
+  getFlags soft >>= stackPush8
+  setFlagBit 2 True
+  addr <- readMem16 vec
+  writeCPU cpuRegPC addr
   advanceCycles 7
 
 logInsn :: Word16 -> Opcode -> NES ()
-logInsn pc (Opcode _ mn mode) =
-  pPrintOperand mode >>= \opStr ->
-  asks (envCycles) >>= readRef >>= \cyc ->
-  readVal RA >>= \a ->
-  readVal RX >>= \x ->
-  readVal RY >>= \y ->
-  readVal RS >>= \s ->
-  getFlags False >>= \p ->
+logInsn pc (Opcode _ mn mode) = do
+  opStr <- pPrintOperand mode
+  cyc <- readCPU cpuCycles
+  a <- readVal RA
+  x <- readVal RX
+  y <- readVal RY
+  s <- readVal RS
+  p <- getFlags False
   let n = fromIntegral $ operandLen mode + 1
       addrs = [pc..pc+n-1]
-  in
-  readMem8 `mapM` addrs >>= \rawCode ->
-  let code = intercalate " " $ printf "%.2X" <$> rawCode in
+  rawCode <- readMem8 `mapM` addrs
+  let code = intercalate " " $ printf "%.2X" <$> rawCode
 
   logDebug $ pack $
     printf "%04X  %-8s  %-15s A:%.2X X:%.2X Y:%.2X P:%.2X S:%.2X CYC:%d"
@@ -789,11 +777,10 @@ logInsn pc (Opcode _ mn mode) =
       cyc
 
 doInsn :: NES ()
-doInsn = 
-  asks (envCPU .> cpuRegPC) >>= \pcRef ->
-  readRef pcRef >>= \pc ->
-  readMem8 pc   >>= \code ->
-  let o@(Opcode _ _ mode) = opMap M.! code in
-  writeRef pcRef (pc + 1 + fromIntegral (operandLen mode)) *>
-  logInsn pc o *>
+doInsn = do
+  pc <- readCPU cpuRegPC
+  code <- readMem8 pc
+  let o@(Opcode _ _ mode) = opMap M.! code
+  writeCPU cpuRegPC (pc + 1 + fromIntegral (operandLen mode))
+  logInsn pc o
   runOp o
